@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Menu IBRO FISH Signature</title>
     <style>
         body, html {
@@ -15,20 +15,27 @@
         #pdf-container {
             width: 100%;
             height: 100vh;
-            overflow-y: auto;
-            -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
+            overflow: hidden;
+            position: relative;
+            touch-action: none;
+            background: #333;
+        }
+        #pdf-viewport {
+            position: absolute;
+            transform-origin: 0 0;
+            will-change: transform;
         }
         canvas {
-            width: 100% !important;
-            height: auto !important;
-            margin: 0 auto;
             display: block;
+            margin: 0 auto;
         }
         #loading {
             position: fixed;
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
+            color: white;
+            font-family: sans-serif;
         }
         #controls {
             position: fixed;
@@ -40,6 +47,7 @@
             display: flex;
             justify-content: center;
             gap: 10px;
+            z-index: 2;
         }
         button {
             padding: 8px 16px;
@@ -53,11 +61,15 @@
 </head>
 <body>
     <div id="pdf-container">
+        <div id="pdf-viewport"></div>
         <div id="loading">Loading PDF...</div>
     </div>
     <div id="controls">
         <button id="prev">Previous</button>
         <button id="next">Next</button>
+        <button id="zoom-in">+</button>
+        <button id="zoom-out">-</button>
+        <button id="fit">Fit</button>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -67,18 +79,127 @@
         let currentPdf = null;
         let currentPage = 1;
         let totalPages = 0;
+        let currentScale = 1;
+        let initialPinchDistance = 0;
+        let originalScale = 1;
+        let viewport = null;
+        let transform = { x: 0, y: 0, scale: 1 };
+        let startPan = { x: 0, y: 0 };
+        let pdfViewport = document.getElementById('pdf-viewport');
+
+        // Touch event handling
+        let touchCache = new Map();
+
+        function getDistance(touch1, touch2) {
+            return Math.hypot(touch2.clientX - touch1.clientX, touch2.clientY - touch1.clientY);
+        }
+
+        function getMidpoint(touch1, touch2) {
+            return {
+                x: (touch1.clientX + touch2.clientX) / 2,
+                y: (touch1.clientY + touch2.clientY) / 2
+            };
+        }
+
+        function updateTransform() {
+            const containerRect = document.getElementById('pdf-container').getBoundingClientRect();
+            
+            // Constrain panning
+            transform.x = Math.min(0, Math.max(transform.x, containerRect.width - (viewport.width * transform.scale)));
+            transform.y = Math.min(0, Math.max(transform.y, containerRect.height - (viewport.height * transform.scale)));
+            
+            pdfViewport.style.transform = `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`;
+        }
+
+        pdfViewport.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            Array.from(e.touches).forEach(touch => {
+                touchCache.set(touch.identifier, { x: touch.clientX, y: touch.clientY });
+            });
+
+            if (e.touches.length === 2) {
+                initialPinchDistance = getDistance(e.touches[0], e.touches[1]);
+                originalScale = transform.scale;
+            } else if (e.touches.length === 1) {
+                startPan = { 
+                    x: e.touches[0].clientX - transform.x,
+                    y: e.touches[0].clientY - transform.y
+                };
+            }
+        });
+
+        pdfViewport.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (e.touches.length === 2) {
+                // Pinch to zoom
+                const currentDistance = getDistance(e.touches[0], e.touches[1]);
+                const scale = (currentDistance / initialPinchDistance) * originalScale;
+                transform.scale = Math.min(Math.max(scale, 0.5), 5);
+                updateTransform();
+            } else if (e.touches.length === 1) {
+                // Pan
+                transform.x = e.touches[0].clientX - startPan.x;
+                transform.y = e.touches[0].clientY - startPan.y;
+                updateTransform();
+            }
+        });
+
+        pdfViewport.addEventListener('touchend', (e) => {
+            Array.from(e.changedTouches).forEach(touch => {
+                touchCache.delete(touch.identifier);
+            });
+        });
+
+        async function renderPage(pageNumber, scale = currentScale) {
+            try {
+                const page = await currentPdf.getPage(pageNumber);
+                
+                // Calculate scale to fit width initially
+                const container = document.getElementById('pdf-container');
+                if (scale === 1) {
+                    viewport = page.getViewport({ scale: 1 });
+                    scale = container.clientWidth / viewport.width;
+                }
+                
+                viewport = page.getViewport({ scale: scale * 2 }); // 2x for high DPI
+                currentScale = scale;
+
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                
+                // Set canvas dimensions to 2x for high DPI
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                
+                // Scale down with CSS for crisp rendering
+                canvas.style.width = `${viewport.width / 2}px`;
+                canvas.style.height = `${viewport.height / 2}px`;
+
+                const renderContext = {
+                    canvasContext: context,
+                    viewport: viewport
+                };
+
+                await page.render(renderContext);
+                
+                // Clear container and add new canvas
+                pdfViewport.innerHTML = '';
+                pdfViewport.appendChild(canvas);
+                
+                // Reset transform
+                transform = { x: 0, y: 0, scale: 1 };
+                updateTransform();
+            } catch (error) {
+                console.error('Error rendering page:', error);
+            }
+        }
 
         async function loadPDF() {
             try {
-                // Load the PDF
                 const loadingTask = pdfjsLib.getDocument('IBROFISH_Signature_Menu.pdf');
                 currentPdf = await loadingTask.promise;
                 totalPages = currentPdf.numPages;
-                
-                // Remove loading message
                 document.getElementById('loading').style.display = 'none';
-                
-                // Render first page
                 renderPage(currentPage);
             } catch (error) {
                 console.error('Error loading PDF:', error);
@@ -86,37 +207,7 @@
             }
         }
 
-        async function renderPage(pageNumber) {
-            try {
-                const page = await currentPdf.getPage(pageNumber);
-                
-                // Calculate scale to fit width
-                const viewport = page.getViewport({ scale: 1 });
-                const container = document.getElementById('pdf-container');
-                const scale = container.clientWidth / viewport.width;
-                const scaledViewport = page.getViewport({ scale });
-
-                const canvas = document.createElement('canvas');
-                const context = canvas.getContext('2d');
-                canvas.height = scaledViewport.height;
-                canvas.width = scaledViewport.width;
-
-                const renderContext = {
-                    canvasContext: context,
-                    viewport: scaledViewport
-                };
-
-                await page.render(renderContext);
-                
-                // Clear container and add new canvas
-                container.innerHTML = '';
-                container.appendChild(canvas);
-            } catch (error) {
-                console.error('Error rendering page:', error);
-            }
-        }
-
-        // Navigation handlers
+        // Navigation and zoom controls
         document.getElementById('prev').addEventListener('click', () => {
             if (currentPage > 1) {
                 currentPage--;
@@ -131,7 +222,21 @@
             }
         });
 
-        // Load PDF when page loads
+        document.getElementById('zoom-in').addEventListener('click', () => {
+            currentScale *= 1.25;
+            renderPage(currentPage, currentScale);
+        });
+
+        document.getElementById('zoom-out').addEventListener('click', () => {
+            currentScale *= 0.8;
+            renderPage(currentPage, currentScale);
+        });
+
+        document.getElementById('fit').addEventListener('click', () => {
+            currentScale = 1;
+            renderPage(currentPage);
+        });
+
         document.addEventListener('DOMContentLoaded', loadPDF);
     </script>
 </body>
